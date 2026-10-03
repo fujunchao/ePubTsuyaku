@@ -94,6 +94,7 @@
             <option value="deepseek" {% if state.form_state.provider_preset == 'deepseek' %}selected{% endif %}>DeepSeek</option>
             <option value="aliyun" {% if state.form_state.provider_preset == 'aliyun' %}selected{% endif %}>阿里云 DashScope</option>
             <option value="openai-compatible" {% if state.form_state.provider_preset == 'openai-compatible' %}selected{% endif %}>OpenAI Compatible</option>
+            <option value="anthropic" {% if state.form_state.provider_preset == 'anthropic' %}selected{% endif %}>Anthropic (Claude)</option>
             <option value="auto" {% if state.form_state.provider_preset == 'auto' %}selected{% endif %}>Auto (读环境变量)</option>
             <option value="mock" {% if state.form_state.provider_preset == 'mock' %}selected{% endif %}>Mock</option>
           </select>
@@ -296,6 +297,13 @@
       } else if (value === "openai-compatible") {
         if (!modelField.value || modelField.value === providerDefaults.deepseek_model || modelField.value === providerDefaults.aliyun_model) {
           modelField.value = providerDefaults.openai_model;
+        }
+      } else if (value === "anthropic") {
+        if (!modelField.value || modelField.value === providerDefaults.deepseek_model || modelField.value === providerDefaults.aliyun_model || modelField.value === providerDefaults.openai_model) {
+          modelField.value = providerDefaults.anthropic_model;
+        }
+        if (!baseUrlField.value || baseUrlField.value === providerDefaults.deepseek_base_url || baseUrlField.value === providerDefaults.aliyun_base_url) {
+          baseUrlField.value = providerDefaults.anthropic_base_url;
         }
       } else if (value === "mock") {
         modelField.value = "mock-model";

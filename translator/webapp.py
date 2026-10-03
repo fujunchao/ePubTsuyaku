@@ -17,6 +17,8 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, sen
 
 from .config import (
     ALIYUN_BASE_URL,
+    ANTHROPIC_BASE_URL,
+    ANTHROPIC_DEFAULT_MODEL,
     DEEPSEEK_BASE_URL,
     LEGACY_PROJECT_API_KEY_ENV,
     PipelineConfig,
@@ -40,6 +42,8 @@ def _default_model_for_preset(provider_preset: str) -> str:
         return "deepseek-v4-flash"
     if provider_preset == "aliyun":
         return "qwen-max"
+    if provider_preset == "anthropic":
+        return ANTHROPIC_DEFAULT_MODEL
     if provider_preset == "mock":
         return "mock-model"
     return "gpt-4.1-mini"
@@ -199,6 +203,17 @@ def resolve_web_provider_settings(
         if not effective_key:
             raise RuntimeError("阿里云模式需要填写 API Key，或提前设置 ALIYUN_API_KEY。")
         return "openai-compatible", effective_key, clean_base_url or ALIYUN_BASE_URL, clean_model or "qwen-max"
+
+    if provider_preset == "anthropic":
+        effective_key = clean_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not effective_key:
+            raise RuntimeError("Anthropic 模式需要填写 API Key，或提前设置 ANTHROPIC_API_KEY。")
+        return (
+            "anthropic",
+            effective_key,
+            clean_base_url or ANTHROPIC_BASE_URL,
+            clean_model or ANTHROPIC_DEFAULT_MODEL,
+        )
 
     if provider_preset == "openai-compatible":
         effective_key = clean_key or first_env(PROJECT_API_KEY_ENV, LEGACY_PROJECT_API_KEY_ENV, "OPENAI_API_KEY")
@@ -735,8 +750,10 @@ def create_app(project_root: Optional[Path] = None) -> Flask:
                 "deepseek_model": "deepseek-v4-flash",
                 "aliyun_model": "qwen-max",
                 "openai_model": "gpt-4.1-mini",
+                "anthropic_model": ANTHROPIC_DEFAULT_MODEL,
                 "deepseek_base_url": DEEPSEEK_BASE_URL,
                 "aliyun_base_url": ALIYUN_BASE_URL,
+                "anthropic_base_url": ANTHROPIC_BASE_URL,
             },
         )
 

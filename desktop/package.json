@@ -1,7 +1,7 @@
 {
   "name": "ePubTsuyaku-desktop",
   "productName": "ePubTsuyaku",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ePubTsuyaku Studio desktop shell: an Electron window over the local Python translation backend.",
   "main": "main.js",
   "private": true,

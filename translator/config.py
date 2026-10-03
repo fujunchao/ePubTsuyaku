@@ -9,6 +9,8 @@ from typing import Optional
 ALIYUN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_BETA_BASE_URL = "https://api.deepseek.com/beta"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-5"
 PROJECT_API_KEY_ENV = "EPUB_TSUYAKU_API_KEY"
 PROJECT_BASE_URL_ENV = "EPUB_TSUYAKU_BASE_URL"
 PROJECT_MODEL_ENV = "EPUB_TSUYAKU_MODEL"
@@ -76,6 +78,20 @@ def resolve_provider_settings(
     if provider == "mock":
         return "mock", None, None, explicit_model or "mock-model"
 
+    if provider == "anthropic":
+        api_key = (
+            os.environ.get(api_key_env)
+            if api_key_env
+            else first_env("ANTHROPIC_API_KEY")
+        )
+        if not api_key:
+            raise RuntimeError(
+                "Anthropic 模式需要设置 ANTHROPIC_API_KEY（或用 --api-key-env 指定环境变量名）。"
+            )
+        model = explicit_model or first_env("ANTHROPIC_MODEL") or ANTHROPIC_DEFAULT_MODEL
+        base_url = explicit_base_url or first_env("ANTHROPIC_BASE_URL") or ANTHROPIC_BASE_URL
+        return "anthropic", api_key, base_url, model
+
     if api_key_env:
         api_key = os.environ.get(api_key_env)
         if not api_key:
@@ -107,6 +123,12 @@ def resolve_provider_settings(
         model = explicit_model or project_model("deepseek-v4-flash", include_openai=False)
         base_url = explicit_base_url or project_base_url(include_openai=False) or DEEPSEEK_BASE_URL
         return "openai-compatible", deepseek_api_key, base_url, model
+
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_api_key:
+        model = explicit_model or first_env("ANTHROPIC_MODEL") or ANTHROPIC_DEFAULT_MODEL
+        base_url = explicit_base_url or first_env("ANTHROPIC_BASE_URL") or ANTHROPIC_BASE_URL
+        return "anthropic", anthropic_api_key, base_url, model
 
     raise RuntimeError(
         "没有找到可用的 API Key。请设置 EPUB_TSUYAKU_API_KEY / OPENAI_API_KEY / ALIYUN_API_KEY / DEEPSEEK_API_KEY，或使用 --provider mock。"

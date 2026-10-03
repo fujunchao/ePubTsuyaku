@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 import time
 import unittest
@@ -7,7 +8,8 @@ from unittest.mock import patch
 
 from ebooklib import epub
 
-from translator.webapp import create_app, discover_epub_files
+from translator.config import ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL
+from translator.webapp import create_app, discover_epub_files, resolve_web_provider_settings
 
 
 def build_sample_epub(
@@ -369,6 +371,44 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(snapshot["job"]["result"]["auto_resume_count"], 1)
             self.assertTrue(any("准备自动续跑" in line for line in snapshot["job"]["logs"]))
             self.assertTrue(any("自动续跑成功" in line for line in snapshot["job"]["logs"]))
+
+    def test_web_ui_offers_anthropic_preset(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            app = create_app(project_root=root)
+            client = app.test_client()
+
+            response = client.get("/")
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('value="anthropic"', html)
+            self.assertIn('"anthropic_model": "claude-sonnet-4-5"', html)
+            self.assertIn(f'"anthropic_base_url": "{ANTHROPIC_BASE_URL}"', html)
+
+    def test_anthropic_preset_resolves_key_and_defaults(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant"}, clear=True):
+            provider, api_key, base_url, model = resolve_web_provider_settings("anthropic", None, None, None)
+
+        self.assertEqual(provider, "anthropic")
+        self.assertEqual(api_key, "sk-ant")
+        self.assertEqual(base_url, ANTHROPIC_BASE_URL)
+        self.assertEqual(model, ANTHROPIC_DEFAULT_MODEL)
+
+    def test_anthropic_preset_honors_form_overrides(self):
+        provider, api_key, base_url, model = resolve_web_provider_settings(
+            "anthropic", "form-key", "https://relay.example.com/v1", "claude-x"
+        )
+
+        self.assertEqual(provider, "anthropic")
+        self.assertEqual(api_key, "form-key")
+        self.assertEqual(base_url, "https://relay.example.com/v1")
+        self.assertEqual(model, "claude-x")
+
+    def test_anthropic_preset_without_key_raises(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "ANTHROPIC_API_KEY"):
+                resolve_web_provider_settings("anthropic", None, None, None)
 
 
 if __name__ == "__main__":

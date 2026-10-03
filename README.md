@@ -1,6 +1,6 @@
 # ePubTsuyaku
 
-> ePubTsuyaku is an LLM-based EPUB translation workspace with resumable pipeline, reference-volume consistency, OpenAI-compatible backends, and a local Web UI.
+> ePubTsuyaku is an LLM-based EPUB translation workspace with resumable pipeline, reference-volume consistency, OpenAI-compatible / Anthropic Messages backends, and a local Web UI.
 
 `ePubTsuyaku` 是一个面向长篇 EPUB 的翻译工具。它不是“一次把整章丢给模型机翻”的脚本，而是一条完整流水线：
 
@@ -15,6 +15,7 @@
 - 任务失败后的自动续跑
 - 前作精翻 EPUB 作为软参考，提取系列译名和文风
 - DeepSeek / 阿里云 / 通用 OpenAI-compatible 接口
+- Anthropic `/v1/messages` 协议（官方 API 与任意兼容网关，支持自定义端点和模型 ID）
 - `mock` 模式本地联调
 - 本地 Web UI：选书、上传、调参、看日志、下载结果
 
@@ -79,6 +80,7 @@ python3 -m pip install -r requirements.txt
 2. `OPENAI_API_KEY`
 3. `ALIYUN_API_KEY`
 4. `DEEPSEEK_API_KEY`
+5. `ANTHROPIC_API_KEY`
 
 常用可选变量：
 
@@ -97,10 +99,21 @@ export ALIYUN_API_KEY=your_aliyun_api_key
 export DEEPSEEK_API_KEY=your_deepseek_api_key
 ```
 
+Anthropic `/v1/messages` 协议（官方或任意兼容网关）：
+
+```bash
+export ANTHROPIC_API_KEY=your_anthropic_api_key
+export ANTHROPIC_BASE_URL=https://api.anthropic.com   # 可换成任意 /v1/messages 兼容网关
+export ANTHROPIC_MODEL=claude-sonnet-4-5
+```
+
+base_url 只填主机名时会自动补 `/v1/messages`；以 `/v1` 结尾会补 `/messages`；写全路径则原样使用。
+
 支持的运行模式：
 
 - `--provider auto`：按环境变量自动选择可用后端
 - `--provider openai-compatible`：显式走 OpenAI-compatible 接口
+- `--provider anthropic`：显式走 Anthropic `/v1/messages` 协议
 - `--provider mock`：不调用真实模型，适合联调和测试
 
 ## 快速开始
@@ -125,7 +138,7 @@ http://127.0.0.1:7860
 - 手动填写绝对路径
 - 上传一个新的 `.epub`
 - 再额外指定一个前作参考 EPUB
-- 选择 `DeepSeek / 阿里云 / OpenAI Compatible / Mock`
+- 选择 `DeepSeek / 阿里云 / OpenAI Compatible / Anthropic / Mock`
 - 调整模型、并发、批次大小、校对阈值等参数
 - 实时查看摘要进度、翻译进度、活动 worker 和日志
 - 任务完成后直接下载输出 EPUB
@@ -164,6 +177,18 @@ uv run --python .venv/bin/python main.py \
   --target-lang 中文 \
   --provider mock \
   --title-suffix "（中文译本）"
+```
+
+Anthropic 协议（自定义网关与模型 ID）：
+
+```bash
+uv run --python .venv/bin/python main.py \
+  --input testBook/yourbook.epub \
+  --source-lang 日语 \
+  --target-lang 中文 \
+  --provider anthropic \
+  --base-url https://api.anthropic.com \
+  --model claude-sonnet-4-5
 ```
 
 默认输出路径：
@@ -249,7 +274,7 @@ ePubTsuyaku/
 - `main.py`：CLI 入口
 - `webui.py`：本地 Web UI 入口
 - `translator/pipeline.py`：完整翻译流水线
-- `translator/llm.py`：OpenAI-compatible 和 mock 客户端封装
+- `translator/llm.py`：OpenAI-compatible / Anthropic Messages / mock 客户端封装
 - `translator/epub_utils.py`：EPUB 解析、分批、内容回写
 - `translator/state.py`：进度文件与上下文状态管理
 - `translator/webapp.py`：Flask UI、后台任务和下载接口

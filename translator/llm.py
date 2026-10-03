@@ -5,9 +5,10 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+import httpx
 from openai import OpenAI
 
-from .config import DEEPSEEK_BETA_BASE_URL
+from .config import ANTHROPIC_BASE_URL, DEEPSEEK_BETA_BASE_URL
 from .epub_utils import batch_segments
 from .prompts import (
     build_reference_prompts,
@@ -444,7 +445,212 @@ class BaseLLMClient:
         raise NotImplementedError
 
 
-class OpenAICompatibleLLMClient(BaseLLMClient):
+def estimate_translation_max_tokens(segments: List[Dict[str, str]]) -> int:
+    total_chars = sum(len(segment.get("text", "")) for segment in segments)
+    total_segments = len(segments)
+    return min(8192, max(1536, total_chars * 3 + total_segments * 24))
+
+
+def estimate_review_max_tokens(segments: List[Dict[str, str]]) -> int:
+    total_chars = sum(len(segment.get("translation", "")) for segment in segments)
+    return min(4096, max(1024, total_chars * 2 + len(segments) * 32))
+
+
+class StructuredOutputClientMixin:
+    """在 `_call_json` 原语之上实现四个翻译任务接口，供不同协议客户端复用。
+
+    宿主类需要提供 `summary_model` / `translation_model` / `review_model` 属性，
+    以及与 `OpenAICompatibleLLMClient._call_json` 相同签名的 `_call_json` 方法。
+    """
+
+    def extract_reference_patch(
+        self,
+        book_metadata: Dict[str, str],
+        reference_profile: Dict[str, Any],
+        segments: List[Dict[str, str]],
+        target_language: str,
+    ) -> Dict[str, Any]:
+        system_prompt, user_prompt = build_reference_prompts(
+            book_metadata,
+            reference_profile,
+            segments,
+            target_language,
+        )
+        payload = self._call_json(
+            system_prompt,
+            user_prompt,
+            model=self.summary_model,
+            temperature=0.0,
+            max_tokens=2048,
+            schema=_reference_patch_schema(),
+            tool_name="return_reference_patch",
+            tool_description="Return a structured previous-volume reference patch json object.",
+        )
+        _validate_reference_patch(payload)
+        return payload
+
+    def summarize(
+        self,
+        book_metadata: Dict[str, str],
+        story_state: Dict[str, Any],
+        segments: List[Dict[str, str]],
+        source_language: str,
+        target_language: str,
+        reference_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        system_prompt, user_prompt = build_summary_prompts(
+            book_metadata,
+            story_state,
+            segments,
+            source_language,
+            target_language,
+            reference_profile=reference_profile,
+        )
+        payload = self._call_json(
+            system_prompt,
+            user_prompt,
+            model=self.summary_model,
+            temperature=0.0,
+            max_tokens=2048,
+            schema=_summary_schema(),
+            tool_name="return_summary",
+            tool_description="Return a structured chapter summary json object.",
+        )
+        _validate_summary_payload(payload)
+        return payload
+
+    def _translate_once(
+        self,
+        book_metadata: Dict[str, str],
+        story_state: Dict[str, Any],
+        segments: List[Dict[str, str]],
+        source_language: str,
+        target_language: str,
+        retry_feedback: Optional[str],
+        reference_profile: Optional[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        system_prompt, user_prompt = build_translation_prompts(
+            book_metadata,
+            story_state,
+            segments,
+            source_language,
+            target_language,
+            retry_feedback=retry_feedback,
+            reference_profile=reference_profile,
+        )
+        payload = self._call_json(
+            system_prompt,
+            user_prompt,
+            model=self.translation_model,
+            temperature=0.1,
+            max_tokens=estimate_translation_max_tokens(segments),
+            schema=_translation_schema([item["id"] for item in segments]),
+            tool_name="return_translations",
+            tool_description="Return all translations as a json object keyed by segment id.",
+        )
+        return _extract_translation_map(payload)
+
+    def _repair_missing_translations(
+        self,
+        book_metadata: Dict[str, str],
+        story_state: Dict[str, Any],
+        segments: List[Dict[str, str]],
+        source_language: str,
+        target_language: str,
+        retry_feedback: Optional[str],
+        reference_profile: Optional[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        repaired: Dict[str, str] = {}
+        repair_feedback = "上一轮返回里有部分 id 缺失。请只补齐本轮给出的这些 id，并保证每个 id 都返回译文。"
+        if retry_feedback:
+            repair_feedback = f"{retry_feedback}\n\n{repair_feedback}"
+        for chunk in batch_segments(segments, max_batch_chars=900, max_batch_segments=24):
+            repaired.update(
+                self._translate_once(
+                    book_metadata=book_metadata,
+                    story_state=story_state,
+                    segments=chunk,
+                    source_language=source_language,
+                    target_language=target_language,
+                    retry_feedback=repair_feedback,
+                    reference_profile=reference_profile,
+                )
+            )
+        return repaired
+
+    def translate(
+        self,
+        book_metadata: Dict[str, str],
+        story_state: Dict[str, Any],
+        segments: List[Dict[str, str]],
+        source_language: str,
+        target_language: str,
+        retry_feedback: Optional[str] = None,
+        reference_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        expected_ids = [item["id"] for item in segments]
+        translation_map = self._translate_once(
+            book_metadata=book_metadata,
+            story_state=story_state,
+            segments=segments,
+            source_language=source_language,
+            target_language=target_language,
+            retry_feedback=retry_feedback,
+            reference_profile=reference_profile,
+        )
+        missing_ids = [segment_id for segment_id in expected_ids if not translation_map.get(segment_id)]
+        if missing_ids:
+            repair_segments = [segment for segment in segments if segment["id"] in set(missing_ids)]
+            translation_map.update(
+                self._repair_missing_translations(
+                    book_metadata=book_metadata,
+                    story_state=story_state,
+                    segments=repair_segments,
+                    source_language=source_language,
+                    target_language=target_language,
+                    retry_feedback=retry_feedback,
+                    reference_profile=reference_profile,
+                )
+            )
+        missing_after_repair = [segment_id for segment_id in expected_ids if not translation_map.get(segment_id)]
+        if missing_after_repair:
+            raise RuntimeError(f"仍有未补齐的片段译文: {', '.join(missing_after_repair)}")
+        return {segment_id: translation_map[segment_id] for segment_id in expected_ids}
+
+    def review(
+        self,
+        book_metadata: Dict[str, str],
+        story_state: Dict[str, Any],
+        source_segments: List[Dict[str, str]],
+        translated_segments: List[Dict[str, str]],
+        source_language: str,
+        target_language: str,
+        reference_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        system_prompt, user_prompt = build_review_prompts(
+            book_metadata,
+            story_state,
+            source_segments,
+            translated_segments,
+            source_language,
+            target_language,
+            reference_profile=reference_profile,
+        )
+        payload = self._call_json(
+            system_prompt,
+            user_prompt,
+            model=self.review_model,
+            temperature=0.0,
+            max_tokens=estimate_review_max_tokens(translated_segments),
+            schema=_review_schema(),
+            tool_name="return_review",
+            tool_description="Return a structured review json object.",
+        )
+        expected_ids = [item["id"] for item in source_segments]
+        return _normalize_review_payload(payload, expected_ids)
+
+
+class OpenAICompatibleLLMClient(StructuredOutputClientMixin, BaseLLMClient):
     def __init__(
         self,
         api_key: str,
@@ -472,17 +678,6 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
         parsed = urlparse(base_url)
         hostname = (parsed.hostname or "").lower()
         return hostname == "api.deepseek.com"
-
-    @staticmethod
-    def _estimate_translation_max_tokens(segments: List[Dict[str, str]]) -> int:
-        total_chars = sum(len(segment.get("text", "")) for segment in segments)
-        total_segments = len(segments)
-        return min(8192, max(1536, total_chars * 3 + total_segments * 24))
-
-    @staticmethod
-    def _estimate_review_max_tokens(segments: List[Dict[str, str]]) -> int:
-        total_chars = sum(len(segment.get("translation", "")) for segment in segments)
-        return min(4096, max(1024, total_chars * 2 + len(segments) * 32))
 
     def _chat_create(self, *, use_strict_client: bool = False, **kwargs: Any):
         client = self.strict_client if use_strict_client and self.strict_client is not None else self.client
@@ -616,191 +811,147 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             raise RuntimeError(f"严格 schema 调用失败：{strict_error}；JSON mode 也连续 3 次失败：{last_error}")
         raise RuntimeError(f"模型连续 3 次未返回合法 JSON: {last_error}")
 
-    def extract_reference_patch(
-        self,
-        book_metadata: Dict[str, str],
-        reference_profile: Dict[str, Any],
-        segments: List[Dict[str, str]],
-        target_language: str,
-    ) -> Dict[str, Any]:
-        system_prompt, user_prompt = build_reference_prompts(
-            book_metadata,
-            reference_profile,
-            segments,
-            target_language,
-        )
-        payload = self._call_json(
-            system_prompt,
-            user_prompt,
-            model=self.summary_model,
-            temperature=0.0,
-            max_tokens=2048,
-            schema=_reference_patch_schema(),
-            tool_name="return_reference_patch",
-            tool_description="Return a structured previous-volume reference patch json object.",
-        )
-        _validate_reference_patch(payload)
-        return payload
 
-    def summarize(
-        self,
-        book_metadata: Dict[str, str],
-        story_state: Dict[str, Any],
-        segments: List[Dict[str, str]],
-        source_language: str,
-        target_language: str,
-        reference_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        system_prompt, user_prompt = build_summary_prompts(
-            book_metadata,
-            story_state,
-            segments,
-            source_language,
-            target_language,
-            reference_profile=reference_profile,
-        )
-        payload = self._call_json(
-            system_prompt,
-            user_prompt,
-            model=self.summary_model,
-            temperature=0.0,
-            max_tokens=2048,
-            schema=_summary_schema(),
-            tool_name="return_summary",
-            tool_description="Return a structured chapter summary json object.",
-        )
-        _validate_summary_payload(payload)
-        return payload
 
-    def _translate_once(
-        self,
-        book_metadata: Dict[str, str],
-        story_state: Dict[str, Any],
-        segments: List[Dict[str, str]],
-        source_language: str,
-        target_language: str,
-        retry_feedback: Optional[str],
-        reference_profile: Optional[Dict[str, Any]],
-    ) -> Dict[str, str]:
-        system_prompt, user_prompt = build_translation_prompts(
-            book_metadata,
-            story_state,
-            segments,
-            source_language,
-            target_language,
-            retry_feedback=retry_feedback,
-            reference_profile=reference_profile,
-        )
-        payload = self._call_json(
-            system_prompt,
-            user_prompt,
-            model=self.translation_model,
-            temperature=0.1,
-            max_tokens=self._estimate_translation_max_tokens(segments),
-            schema=_translation_schema([item["id"] for item in segments]),
-            tool_name="return_translations",
-            tool_description="Return all translations as a json object keyed by segment id.",
-        )
-        return _extract_translation_map(payload)
+class AnthropicMessagesLLMClient(StructuredOutputClientMixin, BaseLLMClient):
+    """Anthropic `/v1/messages` 协议客户端。
 
-    def _repair_missing_translations(
+    - 官方 API 与任意 Anthropic 兼容网关均可：base_url 填主机名时自动补 `/v1/messages`
+    - 同时发送 `x-api-key` 与 `Authorization: Bearer`，兼容两类网关鉴权
+    - 不依赖严格 schema 能力，统一走 JSON 文本解析 + 失败修复重试
+    """
+
+    def __init__(
         self,
-        book_metadata: Dict[str, str],
-        story_state: Dict[str, Any],
-        segments: List[Dict[str, str]],
-        source_language: str,
-        target_language: str,
-        retry_feedback: Optional[str],
-        reference_profile: Optional[Dict[str, Any]],
-    ) -> Dict[str, str]:
-        repaired: Dict[str, str] = {}
-        repair_feedback = "上一轮返回里有部分 id 缺失。请只补齐本轮给出的这些 id，并保证每个 id 都返回译文。"
-        if retry_feedback:
-            repair_feedback = f"{retry_feedback}\n\n{repair_feedback}"
-        for chunk in batch_segments(segments, max_batch_chars=900, max_batch_segments=24):
-            repaired.update(
-                self._translate_once(
-                    book_metadata=book_metadata,
-                    story_state=story_state,
-                    segments=chunk,
-                    source_language=source_language,
-                    target_language=target_language,
-                    retry_feedback=repair_feedback,
-                    reference_profile=reference_profile,
-                )
+        api_key: str,
+        base_url: Optional[str],
+        model: str,
+        summary_model: Optional[str] = None,
+        translation_model: Optional[str] = None,
+        review_model: Optional[str] = None,
+        timeout: int = 300,
+        http_client: Optional[httpx.Client] = None,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = (base_url or ANTHROPIC_BASE_URL).strip()
+        self.endpoint = self.resolve_messages_endpoint(self.base_url)
+        self.model = model
+        self.summary_model = summary_model or model
+        self.translation_model = translation_model or model
+        self.review_model = review_model or model
+        self.timeout = timeout
+        self.client = http_client or httpx.Client(timeout=timeout)
+        self.headers = {
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "authorization": f"Bearer {api_key}",
+            "anthropic-version": "2023-06-01",
+        }
+
+    @staticmethod
+    def resolve_messages_endpoint(base_url: Optional[str]) -> str:
+        """`https://host` -> `https://host/v1/messages`；已含 `/v1` 或 `/messages` 时智能拼接。"""
+        url = (base_url or ANTHROPIC_BASE_URL).strip().rstrip("/")
+        if not url:
+            url = ANTHROPIC_BASE_URL
+        if url.endswith("/messages"):
+            return url
+        if url.endswith("/v1"):
+            return f"{url}/messages"
+        return f"{url}/v1/messages"
+
+    def _complete(
+        self,
+        system_prompt: str,
+        messages: List[Dict[str, str]],
+        model: str,
+        temperature: float,
+        max_tokens: Optional[int],
+    ) -> str:
+        payload = {
+            "model": model,
+            "max_tokens": int(max_tokens or 8192),
+            "temperature": temperature,
+            "system": system_prompt,
+            "messages": messages,
+        }
+        try:
+            response = self.client.post(self.endpoint, json=payload, headers=self.headers)
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"Anthropic 请求超时 (timeout={self.timeout}s): {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Anthropic 连接失败 (connection error): {exc}") from exc
+
+        if response.status_code == 429:
+            raise RuntimeError(f"Anthropic rate limit (429): {response.text[:300]}")
+        if response.status_code == 408:
+            raise RuntimeError(f"Anthropic request timeout (408): {response.text[:300]}")
+        if response.status_code >= 500:
+            raise RuntimeError(f"Anthropic server error ({response.status_code}): {response.text[:300]}")
+        if response.status_code in (401, 403):
+            raise RuntimeError(
+                f"Anthropic API Key 无效或未授权 ({response.status_code})。请检查 ANTHROPIC_API_KEY。"
             )
-        return repaired
+        if response.status_code != 200:
+            raise RuntimeError(f"Anthropic API error ({response.status_code}): {response.text[:300]}")
 
-    def translate(
-        self,
-        book_metadata: Dict[str, str],
-        story_state: Dict[str, Any],
-        segments: List[Dict[str, str]],
-        source_language: str,
-        target_language: str,
-        retry_feedback: Optional[str] = None,
-        reference_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, str]:
-        expected_ids = [item["id"] for item in segments]
-        translation_map = self._translate_once(
-            book_metadata=book_metadata,
-            story_state=story_state,
-            segments=segments,
-            source_language=source_language,
-            target_language=target_language,
-            retry_feedback=retry_feedback,
-            reference_profile=reference_profile,
-        )
-        missing_ids = [segment_id for segment_id in expected_ids if not translation_map.get(segment_id)]
-        if missing_ids:
-            repair_segments = [segment for segment in segments if segment["id"] in set(missing_ids)]
-            translation_map.update(
-                self._repair_missing_translations(
-                    book_metadata=book_metadata,
-                    story_state=story_state,
-                    segments=repair_segments,
-                    source_language=source_language,
-                    target_language=target_language,
-                    retry_feedback=retry_feedback,
-                    reference_profile=reference_profile,
-                )
-            )
-        missing_after_repair = [segment_id for segment_id in expected_ids if not translation_map.get(segment_id)]
-        if missing_after_repair:
-            raise RuntimeError(f"仍有未补齐的片段译文: {', '.join(missing_after_repair)}")
-        return {segment_id: translation_map[segment_id] for segment_id in expected_ids}
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"Anthropic 响应不是合法 JSON: {exc}") from exc
 
-    def review(
+        if isinstance(data, dict) and data.get("type") == "error":
+            error = data.get("error") or {}
+            raise RuntimeError(f"Anthropic API error: {error.get('type')}: {error.get('message')}")
+
+        content = data.get("content") if isinstance(data, dict) else None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+            text = "".join(parts)
+        else:
+            text = ""
+        text = text.strip()
+        if not text:
+            raise ValueError("Anthropic 响应缺少文本内容。")
+        return text
+
+    def _call_json(
         self,
-        book_metadata: Dict[str, str],
-        story_state: Dict[str, Any],
-        source_segments: List[Dict[str, str]],
-        translated_segments: List[Dict[str, str]],
-        source_language: str,
-        target_language: str,
-        reference_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        system_prompt, user_prompt = build_review_prompts(
-            book_metadata,
-            story_state,
-            source_segments,
-            translated_segments,
-            source_language,
-            target_language,
-            reference_profile=reference_profile,
-        )
-        payload = self._call_json(
-            system_prompt,
-            user_prompt,
-            model=self.review_model,
-            temperature=0.0,
-            max_tokens=self._estimate_review_max_tokens(translated_segments),
-            schema=_review_schema(),
-            tool_name="return_review",
-            tool_description="Return a structured review json object.",
-        )
-        expected_ids = [item["id"] for item in source_segments]
-        return _normalize_review_payload(payload, expected_ids)
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        temperature: float,
+        max_tokens: Optional[int] = None,
+        schema: Optional[Dict[str, Any]] = None,
+        tool_name: str = "return_json",
+        tool_description: str = "Return a json object that matches the requested schema.",
+    ) -> Any:
+        # schema / tool_name 仅供 OpenAI 严格模式使用；Anthropic 走 JSON 文本协议，忽略即可。
+        messages: List[Dict[str, str]] = [{"role": "user", "content": user_prompt}]
+        last_error: Optional[BaseException] = None
+        for _ in range(3):
+            try:
+                response_text = self._complete(system_prompt, messages, model, temperature, max_tokens)
+            except ValueError as exc:  # 空响应等软失败，直接重试
+                last_error = exc
+                continue
+            try:
+                return _parse_json_from_text(response_text)
+            except Exception as exc:
+                last_error = exc
+                messages = messages + [
+                    {"role": "assistant", "content": response_text},
+                    {
+                        "role": "user",
+                        "content": f"上一条回复不是合法 json 或缺少必需字段：{exc}。请重新输出完整且合法的 json object，不要附带任何解释。",
+                    },
+                ]
+        raise RuntimeError(f"Anthropic 模型连续 3 次未返回合法 JSON: {last_error}")
 
 
 class MockLLMClient(BaseLLMClient):

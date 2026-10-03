@@ -22,7 +22,7 @@ from .epub_utils import (
     prepare_document,
     set_item_content,
 )
-from .llm import MockLLMClient, OpenAICompatibleLLMClient
+from .llm import AnthropicMessagesLLMClient, MockLLMClient, OpenAICompatibleLLMClient
 from .state import (
     create_progress_document,
     empty_reference_patch,
@@ -140,6 +140,17 @@ class ReferenceContext:
 def _build_llm_client(config: PipelineConfig):
     if config.provider == "mock":
         return MockLLMClient()
+    if config.provider == "anthropic":
+        if not config.api_key:
+            raise RuntimeError("缺少 API Key。")
+        return AnthropicMessagesLLMClient(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            model=config.model,
+            summary_model=config.summary_model,
+            translation_model=config.translation_model,
+            review_model=config.review_model,
+        )
     if not config.api_key:
         raise RuntimeError("缺少 API Key。")
     return OpenAICompatibleLLMClient(

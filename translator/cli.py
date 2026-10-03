@@ -49,9 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-lang", default="中文", help="目标语言，默认中文。")
     parser.add_argument(
         "--provider",
-        choices=("auto", "openai-compatible", "mock"),
+        choices=("auto", "openai-compatible", "anthropic", "mock"),
         default="auto",
-        help="LLM 提供方。mock 用于本地联调。",
+        help="LLM 提供方。anthropic 走 /v1/messages 协议；mock 用于本地联调。",
     )
     parser.add_argument("--api-key-env", help="指定从哪个环境变量读取 API Key。")
     parser.add_argument("--base-url", help="OpenAI 兼容接口的 base_url。")

@@ -1159,6 +1159,52 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.assertTrue(any("参考二。" in item for item in second_shared["reference_inputs"]))
             self.assertTrue(all("参考一。" not in item for item in second_shared["reference_inputs"]))
 
+    def test_anthropic_provider_builds_anthropic_client(self):
+        captured = {}
+
+        class FakeAnthropicClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def extract_reference_patch(self, *args, **kwargs):
+                return {"series_notes": [], "style_notes": [], "characters": [], "terms": []}
+
+            def summarize(self, *args, **kwargs):
+                return empty_summary_response()
+
+            def translate(self, *args, **kwargs):
+                return {segment["id"]: f"[中文] {segment['text']}" for segment in kwargs["segments"]}
+
+            def review(self, *args, **kwargs):
+                return ok_review_response()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "input.epub"
+            output_path = tmp_path / "output.epub"
+            progress_path = tmp_path / "progress.json"
+
+            build_sample_epub(input_path)
+            config = make_config(
+                input_path=input_path,
+                output_path=output_path,
+                progress_path=progress_path,
+                provider="anthropic",
+                translation_workers=1,
+            )
+
+            with patch(
+                "translator.pipeline.AnthropicMessagesLLMClient",
+                FakeAnthropicClient,
+            ):
+                result = run_translation_pipeline(config)
+
+            self.assertEqual(captured["api_key"], "test-key")
+            self.assertEqual(captured["model"], "demo-model")
+            self.assertEqual(captured["base_url"], "https://example.com/v1")
+            self.assertTrue(output_path.exists())
+            self.assertEqual(result["processed_count"], 2)
+
     def test_reference_language_mismatch_fails_fast(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
