@@ -774,7 +774,18 @@ def build_web_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _force_utf8_stdio() -> None:
+    """非中文区域设置的 Windows 下，管道 stdout 默认 cp1252，打印中文会直接崩。"""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _force_utf8_stdio()
     parser = build_web_parser()
     args = parser.parse_args(argv)
     app = create_app()
