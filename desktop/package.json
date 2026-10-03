@@ -1,0 +1,49 @@
+{
+  "name": "ePubTsuyaku-desktop",
+  "productName": "ePubTsuyaku",
+  "version": "0.1.0",
+  "description": "ePubTsuyaku Studio desktop shell: an Electron window over the local Python translation backend.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis zip --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "io.github.epubtsuyaku.desktop",
+    "productName": "ePubTsuyaku",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist-backend/ePubTsuyaku-backend.exe",
+        "to": "backend/ePubTsuyaku-backend.exe"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "zip", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "ePubTsuyaku-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "compression": "maximum"
+  }
+}

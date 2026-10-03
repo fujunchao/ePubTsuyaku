@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import sys
 import threading
 import time
 import traceback
@@ -127,26 +128,38 @@ def _safe_upload_name(original_name: str, content_hash: str) -> str:
     return f"{safe_stem}.{content_hash[:12]}{suffix}"
 
 
-def discover_epub_files(project_root: Path) -> List[Dict[str, str]]:
+def discover_epub_files(project_root: Path, extra_dirs: Optional[List[Path]] = None) -> List[Dict[str, str]]:
     seen = set()
     result: List[Dict[str, str]] = []
     excluded = {".git", "__pycache__", "epubOutput", ".webui"}
 
-    for path in sorted(project_root.rglob("*.epub")):
-        relative_parts = path.relative_to(project_root).parts
-        if any(part in excluded for part in relative_parts):
+    def collect(base_dir: Path, label_prefix: str = "") -> None:
+        if not base_dir.exists():
+            return
+        for path in sorted(base_dir.rglob("*.epub")):
+            relative_parts = path.relative_to(base_dir).parts
+            if any(part in excluded for part in relative_parts):
+                continue
+            resolved = str(path.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            label = str(path.relative_to(base_dir))
+            if label_prefix:
+                label = f"{label_prefix}/{label}"
+            result.append(
+                {
+                    "path": resolved,
+                    "label": label,
+                    "name": path.name,
+                }
+            )
+
+    collect(project_root)
+    for extra_dir in extra_dirs or []:
+        if extra_dir.resolve() == project_root.resolve():
             continue
-        resolved = str(path.resolve())
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        result.append(
-            {
-                "path": resolved,
-                "label": str(path.relative_to(project_root)),
-                "name": path.name,
-            }
-        )
+        collect(extra_dir, extra_dir.name)
     return result
 
 
@@ -274,9 +287,13 @@ class JobManager:
             return self._current_job
         return None
 
+    def _extra_book_dirs(self) -> List[Path]:
+        env_books_dir = os.environ.get("EPUB_TSUYAKU_BOOKS_DIR")
+        return [Path(env_books_dir)] if env_books_dir else []
+
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
-            files = discover_epub_files(self.project_root)
+            files = discover_epub_files(self.project_root, self._extra_book_dirs())
             if self._current_job is None:
                 return {
                     "job": None,
@@ -545,7 +562,8 @@ class JobManager:
             logical_stem = _sanitize_filename_part(Path(input_label or input_path.name).stem)
             progress_name = f"{logical_stem}.{_sanitize_filename_part(target_language)}.json"
             progress_path = self.progress_dir / progress_name
-            output_path = self.project_root / "epubOutput" / f"{logical_stem}.{_sanitize_filename_part(target_language)}.epub"
+            output_root = Path(os.environ.get("EPUB_TSUYAKU_OUTPUT_DIR") or (self.project_root / "epubOutput"))
+            output_path = output_root / f"{logical_stem}.{_sanitize_filename_part(target_language)}.epub"
 
             translation_workers = max(1, int(form_data.get("translation_workers") or 4))
             review_workers = max(0, int(form_data.get("review_workers") or 0))
@@ -684,9 +702,24 @@ class JobManager:
         return send_file(output_path, as_attachment=True, download_name=output_path.name)
 
 
+def _default_project_root() -> Path:
+    """Dev: repo root. Frozen sidecar: data dir via env, else the exe's own folder."""
+    env_data_dir = os.environ.get("EPUB_TSUYAKU_DATA_DIR")
+    if env_data_dir:
+        return Path(env_data_dir)
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
 def create_app(project_root: Optional[Path] = None) -> Flask:
-    root = (project_root or Path(__file__).resolve().parents[1]).resolve()
-    app = Flask(__name__, template_folder="templates", static_folder="static")
+    root = (project_root or _default_project_root()).resolve()
+    package_dir = Path(__file__).resolve().parent
+    app = Flask(
+        __name__,
+        template_folder=str(package_dir / "templates"),
+        static_folder=str(package_dir / "static"),
+    )
     app.secret_key = "epub-tsuyaku-webui"
     manager = JobManager(root)
     app.config["JOB_MANAGER"] = manager

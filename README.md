@@ -202,6 +202,16 @@ epubOutput/<原文件名>.<目标语言>.epub
 
 更换输入书、源/目标语言或参考 EPUB 时，旧进度会自动失效并重新开始，避免错误复用。
 
+## Windows 桌面版（Electron）
+
+项目提供一个 Electron 桌面外壳（`desktop/`），把 Flask Web UI 包成原生窗口：
+
+- Electron 主进程负责启动并守护 PyInstaller 打包的后端 sidecar（`ePubTsuyaku-backend.exe`），健康检查通过后加载页面，退出时按进程树清理
+- 后端 exe 由 `ePubTsuyaku-backend.spec` 构建，Flask 模板与静态资源一并打进包里
+- 打包运行时的目录约定：上传缓存与进度文件在 `%APPDATA%/ePubTsuyaku`，输出 EPUB 在 `文档/ePubTsuyaku/epubOutput`，图书扫描目录为 `文档/ePubTsuyaku`
+- 构建完全在 GitHub Actions（`.github/workflows/build.yml`）执行：单测 → PyInstaller 后端（含冒烟测试）→ electron-builder 产出 NSIS 安装包与便携 zip；手动触发产出 artifact，推送 `v*` tag 自动发布 Release
+- 本地开发方式见 `desktop/README.md`
+
 ## 项目结构
 
 ```text
@@ -209,6 +219,9 @@ ePubTsuyaku/
 ├── main.py
 ├── webui.py
 ├── requirements.txt
+├── ePubTsuyaku-backend.spec
+├── desktop/                  # Electron 桌面外壳（Windows 构建）
+├── .github/workflows/        # GitHub Actions 构建流水线
 ├── translator/
 │   ├── cli.py
 │   ├── config.py

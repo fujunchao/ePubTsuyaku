@@ -9,3 +9,11 @@ epubOutput/*.epub
 .webui/
 progress.*.json
 /*.epub
+
+# Electron / packaging artifacts
+desktop/node_modules/
+desktop/release/
+dist/
+dist-backend/
+build/
+build-backend/
